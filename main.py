@@ -117,7 +117,7 @@ async def on_ready():
     except Exception as e:
         log(f"Failed to sync commands: {e}", "ERROR")
 
-    versionNumber = "v0.2.1"
+    versionNumber = "v0.3.0"
     await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Game(name=versionNumber)
