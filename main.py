@@ -109,24 +109,22 @@ def loadConfig():
 # ---------------- Bot Setup ---------------- #
 @bot.event
 async def on_ready():
-    # Sync Commands
+    global OWNER_ID
+    
     try:
         synced = await bot.tree.sync()
         log(f"Synced {len(synced)} slash commands", "INFO")
     except Exception as e:
         log(f"Failed to sync commands: {e}", "ERROR")
 
-    # Bot Status | Version number
     versionNumber = "v0.2.1"
     await bot.change_presence(
-            status=discord.Status.online,
-            activity=discord.Game(name=versionNumber)
-            )
+        status=discord.Status.online,
+        activity=discord.Game(name=versionNumber)
+    )
 
-    global OWNER_ID
     log(f"Logged in as {bot.user} | {versionNumber}", "SUCCESS")
 
-    # Auto-Configure OWNER if not set
     if OWNER_ID is None:
         if GUILD_ID:
             try:
@@ -136,7 +134,6 @@ async def on_ready():
                 if not guild:
                     guild = await bot.fetch_guild(guild_id)
                 
-                # Set owner
                 if guild:
                     OWNER_ID = guild.owner_id
                     ownerName = guild.get_member(OWNER_ID) or await guild.fetch_member(OWNER_ID)
@@ -146,7 +143,6 @@ async def on_ready():
                         "owner_id": OWNER_ID
                     }
                     saveJson(CONFIG_FILE, updatedData)
-
                 else:
                     log(f"Could not find guild with ID {guild_id}", "ERROR")
             except ValueError:
@@ -156,8 +152,8 @@ async def on_ready():
 
 # ---------------- Bot Events ---------------- #
 @bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionData) -> None:
-    global pinCount
+async def on_raw_reaction_add(payload) -> None:
+    global pinCount, pins, CHANNEL_ID
     foundImage = None
     
     # If the message is from the bot
@@ -189,8 +185,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionData) -> None:
                     log(f"Message: [{messageID}] already pinned. Skipping..", "WARNING")
                     return
 
-                # If the user has not sent a pin before, add ID to 'pinCount.json'
-                pins[messageID] = reactorID
+                # Handle pin tracking counts
                 if reactorID not in pinCount:
                     pinCount[reactorID] = 0
                 pinCount[reactorID] += 1
@@ -200,19 +195,25 @@ async def on_raw_reaction_add(payload: discord.RawReactionData) -> None:
                     if any(message.attachments[0].filename.lower().endswith(ext) for ext in ["png", "jpg", "jpeg", "gif", "webp"]):
                         foundImage = message.attachments[0].url
                         log("Image found.", "PIN")
-
-                # Save jsons
-                saveJson(PINCOUNT_FILE, pinCount) 
-                saveJson(PIN_FILE, pins)
-                log(f"Pin Count for {reactorName}: {pinCount[reactorID]}", "INFO")
-                
+                        
                 # Send Embed
                 embedContent = f"{message.author.name.capitalize()}: {message.content}"
                 view = CreateEmbed(data=embedContent, title=f"📌 {reactorName} | Pin #{pinCount[reactorID]}", image_url=foundImage)
-                await channel.send(f"{user.mention} > Message pinned to {target_channel.mention}. ")
-                await target_channel.send(embed=view.pinEmbed())
-                log(f"Author: {message.author.name.capitalize()} | Message: '{message.content[:15]}...' | Pin User: {reactorName}", "PIN")
+                
+                await channel.send(f"{user.mention} > Message pinned to {target_channel.mention}.", delete_after=5)
+                
+                # FIX 1: Capture the message object into embed_msg variable
+                embed_msg = await target_channel.send(embed=view.pinEmbed())
 
+                # Save the bot's embed message ID into tracking dict
+                pins[messageID] = str(embed_msg.id)
+                
+                # Save jsons
+                saveJson(PINCOUNT_FILE, pinCount) 
+                saveJson(PIN_FILE, pins)
+                
+                log(f"Pin Count for {reactorName}: {pinCount[reactorID]}", "INFO")
+                log(f"Author: {message.author.name.capitalize()} | Message: '{message.content[:15]}...' | Pin User: {reactorName}", "PIN")
             else:
                 await channel.send(f"{user.mention} > The pin channel has not been set...")
                 log("Pin detected, but 'CHANNEL_ID' is not configured.", "WARNING")
@@ -222,16 +223,41 @@ async def on_raw_reaction_add(payload: discord.RawReactionData) -> None:
 
 
 @bot.event
-async def on_raw_reaction_remove(content: discord.RawReactionData) -> None:
+async def on_raw_reaction_remove(content) -> None:
+    global pins, CHANNEL_ID
+
     if content.emoji.name == "📌":
         try:
-            channel = bot.get_channel(content.channel_id) or await bot.fetch_channel(content.channel_id)
-            message = await channel.fetch_message(content.message_id)
-            log(f"Message removed | Channel: [#{channel.name}] | Message: {message.content[:25]}...","INFO")
+            messageID = str(content.message_id)
+            
+            if messageID in pins:
+                embedMessageID = int(pins[messageID])
+
+                if not CHANNEL_ID:
+                    log("Unpin detected but 'CHANNEL_ID' not set", "WARNING")
+                    return
+
+                target_channel = bot.get_channel(int(CHANNEL_ID)) or await bot.fetch_channel(int(CHANNEL_ID))
+
+                try:
+                    embed_msg = await target_channel.fetch_message(embedMessageID)
+                    await embed_msg.delete()
+                    log(f"Deleted Pin: [{embedMessageID}]", "PIN")
+                except discord.NotFound:
+                    log(f"Tried to delete [{embedMessageID}] but it was already missing", "WARNING")
+
+                # Clean up memory and file cache
+                del pins[messageID]
+                saveJson(PIN_FILE, pins)
+
+                origChannel = bot.get_channel(content.channel_id) or await bot.fetch_channel(content.channel_id)
+                await origChannel.send("Message unpinned from the board.", delete_after=5)
+            else:
+                origChannel = bot.get_channel(content.channel_id) or await bot.fetch_channel(content.channel_id)
+                log(f"Reaction removed in [#{origChannel.name}], but no tracking ID was found in pins.json.", "INFO")
 
         except Exception as e:
-            log(f"Failed to fetch message for pin: {e}", "ERROR")
-
+            log(f"Failed to handle reaction removal: {e}", "ERROR")
 # ---------------- Commands ---------------- #
 @tree.command(name="setchannel", description="Set the channel where all pins will be sent")
 async def set_channel(interaction: discord.Interaction) -> None:
